@@ -14,7 +14,7 @@
     },
     {
       "nome": "Maria Souza",
-      "certificado_path": "certs/maria.pfx",
+      "certificado_path": null,
       "usuario": null,
       "senha_ref": "VAULT:CERT_PASSWORD_MARIA",
       "email_2fa": null
