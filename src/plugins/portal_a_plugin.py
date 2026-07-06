@@ -1,66 +1,19 @@
-"""Example portal plugin — State-level Judicial Portal (Portal A).
-
-This is a **template** for portals like Tucujuris, E-SAJ, etc.
-Replace the selectors marked with ``TODO`` with the actual DOM structure
-of the target portal.
-
-Key characteristics demonstrated:
-- Login with username + password + optional 2FA via email.
-- Navigation through menus to reach the intimation list.
-- Table row extraction.
-- "Tomar Ciência" / acknowledge action.
-"""
-
-from __future__ import annotations
-
-from datetime import datetime
-from typing import Any
-
 from src.interfaces.portal_plugin import PortalPlugin
-from src.models import Advogado, IntimacaoRecord, PortalType
-from src.plugins.base_selenium_plugin import SeleniumWaits, selenium_driver, retry_on_transient
-from src.security.credential_vault import CredentialVault
-from src.utils.email_2fa_handler import Email2FAHandler
-from src.utils.logger import get_logger
+from src.models import IntimacaoRecord, Advogado, PortalType
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from typing import Dict, Any, List
+from datetime import datetime
+import logging
 
-logger = get_logger(__name__)
-
-# ---------------------------------------------------------------------------
-# Selectors — update these for the real portal!
-# ---------------------------------------------------------------------------
-
-SELECTORS = {
-    # Login page
-    "login_url": "https://www.portal-exemplo-estadual.jus.br/login",
-    "username_input": ("id", "usuario"),
-    "password_input": ("id", "senha"),
-    "login_button": ("id", "btn-entrar"),
-    # 2FA
-    "mfa_code_input": ("id", "codigo-autenticacao"),
-    "mfa_validate_button": ("id", "btn-validar"),
-    "mfa_skip_link": ("xpath", '//a[contains(text(),"Pular")]'),
-    # Navigation
-    "menu_intimacoes": ("xpath", '//a[contains(text(),"Intimações")]'),
-    "submenu_pendentes": ("xpath", '//a[contains(text(),"Pendentes")]'),
-    # Filters
-    "filter_data_inicio": ("id", "data-inicio"),
-    "filter_data_fim": ("id", "data-fim"),
-    "filter_aplicar_button": ("id", "btn-filtrar"),
-    # Results
-    "result_table": ("xpath", '//table[@class="tabela-intimacoes"]'),
-    "result_rows": ("xpath", './/tbody/tr'),
-    "result_next_page": ("xpath", '//a[@class="proxima-pagina"]'),
-    # Action
-    "btn_tomar_ciencia": ("xpath", './/button[contains(text(),"Ciência")]'),
-    "btn_ignorar": ("xpath", './/button[contains(text(),"Ignorar")]'),
-    "confirm_modal_ok": ("xpath", '//div[@class="modal"]//button[text()="Sim"]'),
-    # Post-action
-    "success_toast": ("xpath", '//div[contains(@class,"alert-success")]'),
-}
-
+logger = logging.getLogger(__name__)
 
 class PortalAPlugin(PortalPlugin):
-    """State-level judicial portal plugin (template)."""
+    """
+    Plugin de demonstração usando Books to Scrape (http://books.toscrape.com/).
+    Simula um portal de intimações onde cada livro é uma "intimação".
+    """
 
     @property
     def portal_type(self) -> PortalType:
@@ -68,186 +21,101 @@ class PortalAPlugin(PortalPlugin):
 
     @property
     def portal_name(self) -> str:
-        return "Portal A (Estadual)"
+        return "Books to Scrape"
 
-    def __init__(self, headless: bool = True, remote_url: str | None = None) -> None:
-        self._headless = headless
-        self._remote_url = remote_url
-        self._driver = None
-        self._wait: SeleniumWaits | None = None
+    def __init__(self, headless: bool = True, remote_url: str | None = None):
+        self.headless = headless
+        self.remote_url = remote_url
+        self.driver = None
         self._authenticated = False
+        self.logger = logger
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
+    async def authenticate(self, advogado: Advogado, config: Dict) -> bool:
+        """Acessa a página principal (não requer login)."""
+        if self.driver is None:
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
 
-    async def authenticate(self, advogado: Advogado, config: dict[str, Any]) -> bool:
-        """Log into the portal with username/password and optional 2FA."""
-        async with selenium_driver(
-            headless=self._headless, remote_url=self._remote_url
-        ) as driver:
-            self._driver = driver
-            self._wait = SeleniumWaits(driver)
+            opts = Options()
+            if self.headless:
+                opts.add_argument("--headless=new")
+                opts.add_argument("--no-sandbox")
+                opts.add_argument("--disable-dev-shm-usage")
+            opts.add_argument("--window-size=1366,768")
+            opts.add_experimental_option("excludeSwitches", ["enable-automation"])
 
-            # -- Login page ------------------------------------------------
-            driver.get(SELECTORS["login_url"])
-            self._wait.until_url_contains("login")
+            if self.remote_url:
+                self.driver = webdriver.Remote(
+                    command_executor=self.remote_url, options=opts
+                )
+            else:
+                self.driver = webdriver.Chrome(options=opts)
 
-            self._wait.for_visible(*SELECTORS["username_input"]).send_keys(
-                advogado.usuario or ""
-            )
+        self.driver.get("http://books.toscrape.com/")
 
-            senha = CredentialVault.get_secret(advogado.senha_ref)
-            self._wait.for_visible(*SELECTORS["password_input"]).send_keys(senha)
-
-            self._wait.for_clickable(*SELECTORS["login_button"]).click()
-
-            # -- Optional 2FA ---------------------------------------------
-            if advogado.email_2fa:
-                try:
-                    # Check if MFA page appeared
-                    mfa_input = self._wait.for_present(
-                        *SELECTORS["mfa_code_input"]
-                    )
-                    logger.info("2FA required for %s", advogado.nome)
-
-                    codigo = await Email2FAHandler.wait_for_code(advogado.email_2fa)
-                    mfa_input.send_keys(codigo)
-                    self._wait.for_clickable(
-                        *SELECTORS["mfa_validate_button"]
-                    ).click()
-                except Exception:
-                    logger.warning("2FA page not detected or skipped")
-
-            # -- Verify logged in -----------------------------------------
-            self._wait.until_url_contains("home")
-            self._authenticated = True
-            logger.info("Authenticated: %s @ %s", advogado.nome, self.portal_name)
-
-            return True
-
-    @retry_on_transient
-    async def fetch_intimations(
-        self, advogado: Advogado, data_referencia: str
-    ) -> list[dict[str, Any]]:
-        """Navigate to the intimation list and extract raw rows."""
-        assert self._driver is not None
-        assert self._wait is not None
-
-        raw_records: list[dict[str, Any]] = []
-
-        # -- Navigate to intimation list ----------------------------------
-        self._wait.for_clickable(*SELECTORS["menu_intimacoes"]).click()
-        self._wait.for_clickable(*SELECTORS["submenu_pendentes"]).click()
-
-        # -- Apply date filter (today) ------------------------------------
-        self._wait.for_visible(*SELECTORS["filter_data_inicio"]).send_keys(
-            data_referencia
+        WebDriverWait(self.driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "article.product_pod"))
         )
-        self._wait.for_visible(*SELECTORS["filter_data_fim"]).send_keys(
-            data_referencia
-        )
-        self._wait.for_clickable(*SELECTORS["filter_aplicar_button"]).click()
 
-        # -- Paginate and extract -----------------------------------------
-        while True:
-            try:
-                table = self._wait.for_present(*SELECTORS["result_table"])
-            except Exception:
-                logger.info("No results table found — probably zero intimations")
-                break
+        self._authenticated = True
+        self.logger.info("✅ Books to Scrape carregado com sucesso.")
+        return True
 
-            rows = table.find_elements(*SELECTORS["result_rows"])
+    async def fetch_intimations(self, advogado: Advogado, data_referencia: str) -> List[Dict[str, Any]]:
+        if not self._authenticated:
+            await self.authenticate(advogado, {})
 
-            for row in rows:
-                record = self._parse_row(row)
-                if record:
-                    raw_records.append(record)
+        raw = []
+        try:
+            books = self.driver.find_elements(By.CSS_SELECTOR, "article.product_pod")
 
-            # Next page?
-            try:
-                next_btn = self._driver.find_element(*SELECTORS["result_next_page"])
-                next_btn.click()
-            except Exception:
-                break
+            for i, book in enumerate(books):
+                titulo_elem = book.find_element(By.CSS_SELECTOR, "h3 a")
+                titulo = titulo_elem.get_attribute("title")
+                preco_elem = book.find_element(By.CSS_SELECTOR, "p.price_color")
+                preco = preco_elem.text
+                star_elem = book.find_element(By.CSS_SELECTOR, "p.star-rating")
+                star_class = star_elem.get_attribute("class")
+                rating = star_class.replace("star-rating ", "")
+                link = titulo_elem.get_attribute("href")
 
-        logger.info(
-            "Fetched %d raw intimations for %s", len(raw_records), advogado.nome
-        )
-        return raw_records
+                raw.append({
+                    "numero_processo": f"BOOK-{i+1:04d}",
+                    "data": datetime.now().strftime("%d/%m/%Y"),
+                    "objeto": f"{titulo} - Avaliação: {rating} estrelas - Preço: {preco}",
+                    "link": link,
+                    "preco": preco,
+                    "rating": rating
+                })
 
-    async def process_intimation(
-        self, raw_data: dict[str, Any], advogado: Advogado
-    ) -> IntimacaoRecord:
-        """Map raw row dict → canonical model."""
+            self.logger.info(f"📚 Extraídos {len(raw)} livros da página.")
+            return raw
+
+        except Exception as e:
+            self.logger.error(f"Erro ao extrair livros: {e}")
+            return []
+
+    async def process_intimation(self, raw_data: Dict[str, Any], advogado: Advogado) -> IntimacaoRecord:
         return IntimacaoRecord(
             data_consulta=datetime.now().strftime("%Y-%m-%d"),
-            portal=self.portal_name,
+            portal=self.portal_type.value,
             advogado=advogado.nome,
-            sequencia=raw_data.get("sequencia", ""),
-            numero_processo=raw_data.get("numero_processo"),
-            objeto_comunicacao=raw_data.get("objeto"),
-            tipo_comunicacao=raw_data.get("tipo"),
-            data_comunicacao=raw_data.get("data"),
-            data_prazo_fatal=raw_data.get("prazo"),
+            sequencia=raw_data.get("numero_processo", "").split("-")[1],
+            numero_processo=raw_data.get("numero_processo", ""),
+            objeto_comunicacao=raw_data.get("objeto", ""),
+            data_comunicacao=raw_data.get("data", ""),
+            tipo_comunicacao=raw_data.get("rating", ""),
             raw_data=raw_data,
+            status_registro="Pendente"
         )
 
-    @retry_on_transient
-    async def take_action(
-        self, record: IntimacaoRecord, advogado: Advogado
-    ) -> None:
-        """Click 'Tomar Ciência' on a specific intimation row."""
-        assert self._driver is not None
-        assert self._wait is not None
-
-        # Locate the row matching this record and click the action button
-        btn = self._driver.find_element(*SELECTORS["btn_tomar_ciencia"])
-        btn.click()
-
-        # Confirm modal if present
-        try:
-            self._wait.for_clickable(*SELECTORS["confirm_modal_ok"]).click()
-        except Exception:
-            pass  # no modal — fine
-
-        # Wait for success feedback
-        self._wait.for_present(*SELECTORS["success_toast"])
-
-        record.status_registro = "Sucesso"
-        logger.debug("Acknowledged: proc=%s", record.numero_processo)
+    async def take_action(self, record: IntimacaoRecord, advogado: Advogado) -> None:
+        self.logger.info(f"📖 Ação simulada para: {record.numero_processo}")
 
     async def cleanup(self) -> None:
-        if self._driver:
-            try:
-                self._driver.quit()
-            except Exception:
-                pass
-            self._driver = None
-            self._wait = None
-
-    # ------------------------------------------------------------------
-    # Row parser (portal-specific)
-    # ------------------------------------------------------------------
-
-    def _parse_row(self, row: Any) -> dict[str, Any] | None:
-        """Extract fields from a single ``<tr>`` element.
-
-        Update this method to match the real portal's column layout.
-        """
-        try:
-            cells = row.find_elements("tag name", "td")
-            if len(cells) < 3:
-                return None
-
-            return {
-                "sequencia": cells[0].text.strip() if len(cells) > 0 else "",
-                "numero_processo": cells[1].text.strip() if len(cells) > 1 else "",
-                "objeto": cells[2].text.strip() if len(cells) > 2 else "",
-                "tipo": cells[3].text.strip() if len(cells) > 3 else "",
-                "data": cells[4].text.strip() if len(cells) > 4 else "",
-                "prazo": cells[5].text.strip() if len(cells) > 5 else "",
-            }
-        except Exception as exc:
-            logger.warning("Failed to parse row: %s", exc)
-            return None
+        """Fecha o driver."""
+        if self.driver:
+            self.driver.quit()
+            self.driver = None
+            self._authenticated = False
+            self.logger.info("Driver encerrado.")
